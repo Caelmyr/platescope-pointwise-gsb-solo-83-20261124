@@ -3,7 +3,7 @@
 const byId = (name) => document.getElementById(name);
 const state = {
   modes: {}, mode: 'spots', panel: null, options: null, image: null, result: null,
-  tool: null, anchor: null, hover: null, marker: null, plotCursor: null, serial: 0,
+  tool: null, anchor: null, hover: null, marker: null, markerBox: null, plotCursor: null, serial: 0,
 };
 const photoCanvas = byId('photo');
 const photoContext = photoCanvas.getContext('2d');
@@ -187,9 +187,16 @@ function drawPhoto() {
     const [bx, by] = state.hover;
     const [ax, ay] = state.anchor || state.hover;
     if (state.tool !== 'roi' || state.anchor) {
-      const mark = state.tool === 'roi'
-        ? {type: 'box', points: [[Math.min(ax, bx), Math.min(ay, by)], [Math.max(ax, bx), Math.max(ay, by)]]}
-        : {type: 'line', points: [[state.options.roi[0], by], [state.options.roi[2], by]]};
+      let mark;
+      if (state.tool === 'roi') {
+        mark = {type: 'box', points: [[Math.min(ax, bx), Math.min(ay, by)], [Math.max(ax, bx), Math.max(ay, by)]]};
+      } else if (state.tool === 'front') {
+        mark = state.anchor
+          ? {type: 'line', points: [[ax, ay], [bx, by]]}
+          : {type: 'line', points: [[state.options.roi[0], by], [state.options.roi[2], by]]};
+      } else {
+        mark = {type: 'line', points: [[state.options.roi[0], by], [state.options.roi[2], by]]};
+      }
       drawMark({...mark, color: '#ef7619'}, width, height);
     }
   }
@@ -198,6 +205,11 @@ function drawPhoto() {
     const radius = Math.max(5, width / 100);
     photoContext.strokeStyle = '#ecff96';
     photoContext.lineWidth = Math.max(2, width / 600);
+    if (state.markerBox) {
+      const [bx0, by0, bx1, by1] = state.markerBox;
+      photoContext.strokeRect(bx0 * scaleX, by0 * scaleY,
+                              (bx1 - bx0) * scaleX, (by1 - by0) * scaleY);
+    }
     photoContext.beginPath();
     photoContext.arc(x, y, radius, 0, Math.PI * 2);
     photoContext.moveTo(x - radius * 1.5, y);
@@ -208,9 +220,12 @@ function drawPhoto() {
   }
 }
 
-function showAt(at) {
+function showAt(at, box) {
   state.marker = at;
-  if (at) byId('position').textContent = `原片 ${at[0]}, ${at[1]} px`;
+  state.markerBox = box || null;
+  if (at) byId('position').textContent = box
+    ? `原片 ${at[0]}, ${at[1]} px · 该读数支持区 ${box[2] - box[0] + 1} × ${box[3] - box[1] + 1} px`
+    : `原片 ${at[0]}, ${at[1]} px`;
   drawPhoto();
 }
 
@@ -222,7 +237,9 @@ function drawPlot() {
   plotContext.clearRect(0, 0, width, height);
   byId('plot-title').textContent = graph.label;
   byId('sample-read').textContent = state.plotCursor
-    ? `${state.plotCursor.x} · ${state.plotCursor.y}` : '点击曲线回到原片';
+    ? `${state.plotCursor.x} · ${state.plotCursor.y}` +
+      (state.plotCursor.support ? ` · 支持像素 ${state.plotCursor.support}` : '')
+    : '点击曲线回到原片，矩形为该读数的像素支持区';
   const samples = graph.samples;
   const [left, right, top, bottom] = [47, width - 27, 13, height - 28];
   const minX = samples[0].x;
@@ -303,6 +320,7 @@ async function run() {
   state.options = result.settings;
   state.result = result;
   state.marker = null;
+  state.markerBox = null;
   state.plotCursor = null;
   renderResult();
 }
@@ -315,6 +333,7 @@ async function openCheck(id) {
   state.mode = saved.mode;
   state.options = saved.settings;
   state.marker = null;
+  state.markerBox = null;
   state.plotCursor = null;
   drawInputs();
   renderModes();
@@ -327,7 +346,12 @@ function selectTool(name) {
   state.hover = null;
   photoCanvas.classList.toggle('active-tool', Boolean(name));
   for (const button of tools) button.classList.toggle('chosen', name === button.dataset.tool);
-  byId('position').textContent = name === 'roi' ? '在照片上点板区的两个对角' : name ? '点击照片标出参考线' : '';
+  const hint = {
+    roi: '在照片上点板区的两个对角',
+    front: '依次点溶剂前沿的左端、右端（水平时点同一高度即可）',
+    origin: '点击照片标出水平起跑线',
+  }[name] || '';
+  byId('position').textContent = hint;
   drawPhoto();
 }
 
@@ -376,10 +400,28 @@ photoCanvas.addEventListener('click', safe(async (event) => {
       chosen.front = top + margin;
       chosen.origin = bottom - margin;
     }
+    chosen.front_line = null;
+  } else if (state.tool === 'front') {
+    // 先点左端、再点右端；两端基本水平时后台自动折叠回原来的单横线读法。
+    if (!state.anchor) {
+      state.anchor = point;
+      byId('position').textContent = '已点左端，再点溶剂前沿的右端';
+      drawPhoto();
+      return;
+    }
+    const [ax, ay] = state.anchor;
+    const [lx, rx] = [Math.min(ax, x), Math.max(ax, x)];
+    if (rx - lx < .02) throw Error('两个端点应分别靠近板区的左、右两侧。');
+    const line = [[lx, ay], [rx, y]].sort((p, q) => p[0] - q[0]);
+    if (Math.max(...line.map(p => p[1])) >= chosen.origin - .04) {
+      throw Error('在板区内点击，溶剂前沿应在起跑线上方。');
+    }
+    chosen.front_line = line;
+    chosen.front = (line[0][1] + line[1][1]) / 2;
   } else {
     const next = {...chosen, [state.tool]: y};
     if (next.front < next.roi[1] || next.origin > next.roi[3] || next.origin - next.front < .04) {
-      throw Error('在板区内点击，溶剂前沿应在起跑线上方。');
+      throw Error('在板区内点击，起跑线应在溶剂前沿下方。');
     }
     chosen[state.tool] = y;
   }
@@ -396,7 +438,7 @@ plotCanvas.addEventListener('click', (event) => {
   const x = (event.clientX - rect.left) * plotCanvas.width / rect.width;
   const t = Math.max(0, Math.min(1, (x - left) / (right - left)));
   state.plotCursor = graph.samples[Math.round(t * (graph.samples.length - 1))];
-  showAt(state.plotCursor.at);
+  showAt(state.plotCursor.at, state.plotCursor.box);
   drawPlot();
 });
 
@@ -437,6 +479,7 @@ byId('save').addEventListener('click', safe(async () => {
   state.options = saved.check.settings;
   state.result = saved.check;
   state.marker = null;
+  state.markerBox = null;
   state.plotCursor = null;
   renderResult();
   notice('读板已保存，可下载 CSV 或标记 PNG');

@@ -12,6 +12,11 @@ def csv_text(result):
     writer.writerow(["field", "value", "details", "original_x", "original_y"])
     writer.writerow(["mode", result["heading"], result.get("title", "")])
     writer.writerow(["migration", result["settings"]["front"], result["settings"]["origin"]])
+    front_line = result["settings"].get("front_line")
+    if front_line:
+        writer.writerow(["front_line",
+                         ";".join(f"{x:.6f},{y:.6f}" for x, y in front_line),
+                         "溶剂前沿左、右端点（归一化坐标）"])
     for metric in result["metrics"]:
         writer.writerow([metric["label"], metric["value"], metric["units"]])
     for row in result["rows"]:

@@ -19,6 +19,7 @@ MODES = {
 DEFAULTS = {
     "roi": [.1, .08, .9, .92],
     "front": .14,
+    "front_line": None,
     "origin": .86,
     "lanes": 4,
     "lane": 2,
@@ -30,6 +31,14 @@ DEFAULTS = {
     "min_height": 5,
     "tolerance": .10,
 }
+# Rf 分箱在最短跑程一列至少覆盖多少个原片行。短侧每箱都有真实像素，
+# 同时全道共用同一 Rf 网格，避免按列各自重采样产生的虚假尖峰。
+BIN_PIXEL_FLOOR = 2.0
+# Rf 空间平滑量（以分箱宽度计）。约等于旧读法 1.3 px 的行平滑，
+# 在短跑程一侧平滑随分箱自动变宽，不额外吃掉细带。
+BIN_SMOOTH = 1.0
+# 两端高度差小于该比例时视为水平前沿，直接走原来的整行平均读法。
+LEVEL_TOLERANCE = 1e-3
 CHANNELS = {"auto": "最强显色", "red": "红光", "green": "绿光", "blue": "蓝光"}
 
 
@@ -57,6 +66,30 @@ def numeric(value, label, start, stop, integer=False):
     return int(number) if integer else number
 
 
+def front_line_value(value, rect, origin):
+    """Two normalized solvent-front endpoints; None keeps the single horizontal line."""
+    if value is None:
+        return None
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        raise Invalid("溶剂前沿应点出左、右两个端点。")
+    points = []
+    for point in value:
+        if not isinstance(point, (list, tuple)) or len(point) != 2:
+            raise Invalid("溶剂前沿端点应为板上的坐标点。")
+        px = numeric(point[0], "前沿端点横向", rect[0], rect[2])
+        py = numeric(point[1], "前沿端点纵向", rect[1], rect[3])
+        points.append([px, py])
+    left, right = sorted(points, key=lambda point: point[0])
+    if right[0] - left[0] < .02:
+        raise Invalid("前沿两个端点应分别靠近板区的左、右两侧。")
+    if max(left[1], right[1]) >= origin - .04:
+        raise Invalid("溶剂前沿应在起跑线上方，两线之间须有可读距离。")
+    if abs(left[1] - right[1]) <= LEVEL_TOLERANCE:
+        # 两端水平：折叠成旧的单横线，照旧读法处理。
+        return None
+    return left, right
+
+
 def settings(value, fallback):
     chosen = {**fallback, **object_value(value)}
     rect = chosen["roi"]
@@ -69,12 +102,14 @@ def settings(value, fallback):
     origin = numeric(chosen["origin"], "起跑线", y0, y1)
     if origin - front < .04:
         raise Invalid("溶剂前沿应在起跑线上方，两线之间须有可读距离。")
+    front_line = front_line_value(chosen.get("front_line"), [x0, y0, x1, y1], origin)
     lanes = numeric(chosen["lanes"], "泳道数", 1, 12, True)
     channel = chosen["channel"]
     if not isinstance(channel, str) or channel not in CHANNELS:
         raise Invalid("请选择一种显色通道。")
     return {
-        "roi": [x0, y0, x1, y1], "front": front, "origin": origin,
+        "roi": [x0, y0, x1, y1], "front": front, "front_line": front_line,
+        "origin": origin,
         "lanes": lanes, "lane": numeric(chosen["lane"], "当前道", 1, lanes, True),
         "reference": numeric(chosen["reference"], "参照道", 1, lanes, True),
         "sample_band": numeric(chosen["sample_band"], "样品带序号", 1, 128, True),

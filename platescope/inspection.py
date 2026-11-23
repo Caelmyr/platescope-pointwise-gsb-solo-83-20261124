@@ -46,16 +46,27 @@ def lane_bands(view, report, number):
 def coordinates(view, out):
     x0, y0, x1, y1 = view.region
     out.mark("box", (x0, y0, x1 - 1, y1 - 1), GUIDE)
-    out.mark("line", (x0, view.front, x1 - 1, view.front), GUIDE, "溶剂前沿")
+    if view.tilted:
+        (fx0, fy0), (fx1, fy1) = view.front_line
+        out.mark("line", (int(round(fx0)), int(round(fy0)),
+                          int(round(fx1)), int(round(fy1))), GUIDE, "溶剂前沿")
+    else:
+        out.mark("line", (x0, view.front, x1 - 1, view.front), GUIDE, "溶剂前沿")
     out.mark("line", (x0, view.origin, x1 - 1, view.origin), GUIDE, "起跑线")
     for x in view.edges[1:-1]:
-        out.mark("line", (x, view.front, x, view.origin), GUIDE)
+        out.mark("line", (x, int(round(view.front_y(x))), x, view.origin), GUIDE)
+
+
+def migration_run(view, lane_number):
+    x0, _, x1, _ = view.lane_box(lane_number)
+    runs = [view.origin - view.front_y(x) for x in range(x0, x1)]
+    return int(round(float(np.median(runs))))
 
 
 def spot_report(view, out):
     bands = lane_bands(view, out, out.settings["lane"])
     out.metric("显色带", len(bands), "条")
-    out.metric("迁移距离", view.origin - view.front, "px")
+    out.metric("迁移距离", migration_run(view, out.settings["lane"]), "px")
     out.metric("显色积分", round(sum(band.amount for band in bands), 1))
     for band in bands:
         out.band(band, prefix="带")
@@ -81,17 +92,67 @@ def lanes_report(view, out):
 def profile_report(view, out):
     lane = signals.scan(view, out.settings["lane"], out.settings["channel"])
     bands = signals.bands(view, lane, out.settings)
-    x0, y0, x1, _ = lane.box
-    indexes = np.unique(np.linspace(len(lane.profile) - 1, 0, min(len(lane.profile), 550)).round().astype(int))
-    x = (x0 + x1 - 1) // 2
-    out.plot = {"label": "Rf 与道内平均显色", "samples": [
-        {"x": round(view.rf(y0 + int(i)), 6), "y": round(float(lane.profile[i]), 6), "at": [x, y0 + int(i)]}
-        for i in reversed(indexes)]}
+    if view.tilted:
+        tilted_profile(view, lane, out)
+    else:
+        x0, y0, x1, _ = lane.box
+        indexes = np.unique(np.linspace(len(lane.profile) - 1, 0, min(len(lane.profile), 550)).round().astype(int))
+        x = (x0 + x1 - 1) // 2
+        out.plot = {"label": "Rf 与道内平均显色", "samples": [
+            {"x": round(view.rf(y0 + int(i)), 6), "y": round(float(lane.profile[i]), 6), "at": [x, y0 + int(i)]}
+            for i in reversed(indexes)]}
     out.metric("平均显色峰值", round(float(lane.profile.max()), 4))
     out.metric("显色带", len(bands), "条")
     for band in bands:
         out.band(band, prefix="带")
         out.row(f"带 {band.number}", round(band.peak, 4), f"峰值 · Rf {band.rf:.4f}", band.center)
+
+
+def tilted_profile(view, lane, out):
+    """One Rf curve for the lane; every sample points back at its source pixels."""
+    x0, y0, x1, _ = lane.box
+    edges = lane.rf_edges
+    bin_count = len(edges) - 1
+    centers = (edges[:-1] + edges[1:]) / 2
+    grid, weight = lane.rf_grid, lane.rf_weight
+    valid = np.isfinite(grid)
+    index = np.clip(np.searchsorted(edges, grid, side="right") - 1, 0, bin_count - 1)
+    flat_index = np.where(valid, index, -1).ravel()
+    row_index, col_index = np.nonzero(valid)
+    bin_id = flat_index[flat_index >= 0]
+    weights = weight[row_index, col_index]
+    # 每个箱的回点位置与支持区一次性向量化汇总，避免按箱反复扫描整张泳道。
+    sums = np.bincount(bin_id, weights=weights, minlength=bin_count)
+    row_sum = np.bincount(bin_id, weights=row_index, minlength=bin_count)
+    col_sum = np.bincount(bin_id, weights=col_index, minlength=bin_count)
+    row_min = np.full(bin_count, grid.shape[0], dtype=np.int64)
+    row_max = np.full(bin_count, -1, dtype=np.int64)
+    col_min = np.full(bin_count, grid.shape[1], dtype=np.int64)
+    col_max = np.full(bin_count, -1, dtype=np.int64)
+    np.minimum.at(row_min, bin_id, row_index)
+    np.maximum.at(row_max, bin_id, row_index)
+    np.minimum.at(col_min, bin_id, col_index)
+    np.maximum.at(col_max, bin_id, col_index)
+    keep = np.unique(np.linspace(0, bin_count - 1, min(bin_count, 550)).round().astype(int))
+    samples = []
+    for i in keep:
+        if row_max[i] < 0:
+            continue
+        if sums[i] > 0:
+            at_x = x0 + int(round(col_sum[i] / sums[i]))
+            at_y = y0 + int(round(row_sum[i] / sums[i]))
+        else:
+            at_x = x0 + int(round((col_min[i] + col_max[i]) / 2))
+            at_y = y0 + int(round((row_min[i] + row_max[i]) / 2))
+        samples.append({
+            "x": round(float(centers[i]), 6),
+            "y": round(float(lane.rf_profile[i]), 6),
+            "at": [at_x, at_y],
+            "support": int(lane.rf_support[i]),
+            "box": [x0 + int(col_min[i]), y0 + int(row_min[i]),
+                    x0 + int(col_max[i]), y0 + int(row_max[i])],
+        })
+    out.plot = {"label": "Rf 与按列跑程汇总的道内显色", "samples": samples}
 
 
 def pair_lanes(view, out):
