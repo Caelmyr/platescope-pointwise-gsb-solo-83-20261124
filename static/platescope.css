@@ -103,3 +103,10 @@ fieldset legend { font-size: .86rem; font-weight: 700; }
   .records-title { margin-top: 4px; }
   .items { max-height: 140px; }
 }
+.association { margin: 4px 0 10px; background: #fff; border: 1px solid var(--line); border-radius: 5px; padding: 10px; }
+.association h3 { margin: 0 0 6px; font-size: .92rem; color: var(--ink); }
+.association-options { display: grid; gap: 7px; }
+.association-card { display: grid; gap: 3px; text-align: left; background: var(--paper); border: 1px solid #d4d8d3; border-radius: 5px; padding: 8px 10px; cursor: pointer; }
+.association-card strong { color: var(--ink); font-size: .86rem; }
+.association-card small { color: var(--muted); font-size: .74rem; }
+.association-card.chosen { border-color: #438375; background: #dceee3; }

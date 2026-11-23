@@ -4,6 +4,7 @@ const byId = (name) => document.getElementById(name);
 const state = {
   modes: {}, mode: 'spots', panel: null, options: null, image: null, result: null,
   tool: null, anchor: null, hover: null, marker: null, plotCursor: null, serial: 0,
+  association: {}, associationBasis: null, associationActive: false,
 };
 const photoCanvas = byId('photo');
 const photoContext = photoCanvas.getContext('2d');
@@ -90,7 +91,9 @@ function listChecks() {
 function inputValues() {
   const form = byId('settings');
   return {...state.options, channel: form.elements.channel.value,
-          ...Object.fromEntries(inputNames.map(name => [name, form.elements[name].valueAsNumber]))};
+          ...Object.fromEntries(inputNames.map(name => [name, form.elements[name].valueAsNumber])),
+          association: state.association, association_basis: state.associationBasis,
+          association_active: state.associationActive};
 }
 
 function drawInputs() {
@@ -132,6 +135,9 @@ async function openPanel(id) {
   state.image = image;
   state.options = panel.settings;
   state.result = null;
+  state.association = panel.settings.association || {};
+  state.associationBasis = panel.settings.association_basis || null;
+  state.associationActive = panel.settings.association_active === true;
   localStorage.setItem('platescope-panel', id);
   byId('title').textContent = panel.title;
   byId('source-info').textContent = `${sourceTag(panel)} · ${panel.filename} · ${panel.width} × ${panel.height} px`;
@@ -261,6 +267,53 @@ function drawPlot() {
   }
 }
 
+function sameBasis(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function renderAssociation() {
+  const box = byId('association-box');
+  const payload = state.result?.association;
+  if (!payload || state.mode !== 'matches') {
+    box.hidden = true;
+    return;
+  }
+  box.hidden = false;
+  const status = byId('association-status');
+  const options = byId('association-options');
+  options.replaceChildren();
+  const adopted = state.association;
+  const adoptedCount = Object.keys(adopted).length;
+  const stillValid = state.associationActive && adoptedCount > 0 && payload.suggestions.some(suggestion =>
+    suggestion.pairs.length === adoptedCount &&
+    suggestion.pairs.every(pair => adopted[pair.sample] === pair.reference));
+  status.textContent = stillValid
+    ? `已采用一组认定，共 ${adoptedCount} 条；换道或改动容差、标定等设置后会重新认定。`
+    : '下面的认定按当前设置重新算出，未认到的样品带仍保留在读数里。';
+  payload.suggestions.forEach((suggestion, index) => {
+    const card = piece('button', 'association-card');
+    const isAdopted = state.associationActive && adoptedCount > 0 &&
+      suggestion.pairs.length === adoptedCount &&
+      suggestion.pairs.every(pair => adopted[pair.sample] === pair.reference);
+    card.classList.toggle('chosen', isAdopted);
+    card.append(piece('strong', '', index === 0 && payload.suggestions.length > 1
+      ? `建议 · ${suggestion.strategy === 'cautious' ? '先稳单条' : '先压总量'}`
+      : (suggestion.strategy === 'cautious' ? '先稳单条（最偏一条最小）' : '先压总量（整组偏差最小）')));
+    card.append(piece('small', '', `认定 ${suggestion.pairs.length} 条 · 最偏 |ΔRf| ${suggestion.max_distance} · 合计 |ΔRf| ${suggestion.total_distance}`));
+    card.append(piece('small', '', suggestion.pairs
+      .map(pair => `样${pair.sample}→参${pair.reference}`).join('，') || '容差内无可认定的带'));
+    card.append(piece('small', '', suggestion.rationale));
+    card.addEventListener('click', safe(async () => {
+      state.association = Object.fromEntries(suggestion.pairs.map(pair => [pair.sample, pair.reference]));
+      state.associationBasis = payload.basis;
+      state.associationActive = true;
+      await run();
+      notice(`已采用该组认定，共 ${suggestion.pairs.length} 条；可到「相对显色量」查看。`);
+    }));
+    options.append(card);
+  });
+}
+
 function renderResult() {
   const result = state.result;
   if (!result) return;
@@ -291,12 +344,26 @@ function renderResult() {
   }
   drawPhoto();
   drawPlot();
+  renderAssociation();
   listChecks();
+}
+
+const BASIS_FIELDS = ['lane', 'reference', 'tolerance', 'roi', 'front', 'origin', 'lanes',
+  'channel', 'cutoff', 'min_height'];
+
+function basisOf(settings) {
+  return Object.fromEntries(BASIS_FIELDS.map(name => [name, settings[name]]));
 }
 
 async function run() {
   if (!state.panel || !byId('settings').reportValidity()) return;
   const serial = ++state.serial;
+  if (state.associationActive && state.associationBasis &&
+      !sameBasis(state.associationBasis, basisOf(inputValues()))) {
+    state.association = {};
+    state.associationBasis = null;
+    state.associationActive = false;
+  }
   const chosen = inputValues();
   const result = await request(panelPath('/preview'), 'POST', {mode: state.mode, settings: chosen});
   if (serial !== state.serial) return;
@@ -314,6 +381,9 @@ async function openCheck(id) {
   state.result = saved;
   state.mode = saved.mode;
   state.options = saved.settings;
+  state.association = saved.settings.association || {};
+  state.associationBasis = saved.settings.association_basis || null;
+  state.associationActive = saved.settings.association_active === true;
   state.marker = null;
   state.plotCursor = null;
   drawInputs();

@@ -29,6 +29,9 @@ DEFAULTS = {
     "cutoff": .095,
     "min_height": 5,
     "tolerance": .10,
+    "association": {},
+    "association_basis": None,
+    "association_active": False,
 }
 CHANNELS = {"auto": "最强显色", "red": "红光", "green": "绿光", "blue": "蓝光"}
 
@@ -57,6 +60,41 @@ def numeric(value, label, start, stop, integer=False):
     return int(number) if integer else number
 
 
+def clean_association(value):
+    """Validate an adopted sample-to-reference band map; discard invalid input.
+
+    JSON storage turns integer keys into strings, so numeric strings are
+    coerced back while booleans and other non-numeric values are rejected.
+    """
+    if not isinstance(value, dict):
+        return {}
+    result = {}
+    for sample, standard in value.items():
+        if isinstance(sample, bool) or isinstance(standard, bool):
+            return {}
+        sample = int(sample) if isinstance(sample, str) and sample.isdigit() else sample
+        standard = int(standard) if isinstance(standard, str) and standard.isdigit() else standard
+        if not isinstance(sample, int) or not isinstance(standard, int):
+            return {}
+        if not 1 <= sample <= 128 or not 1 <= standard <= 128:
+            return {}
+        if sample in result or standard in result.values():
+            return {}
+        result[sample] = standard
+    return result
+
+
+def clean_basis(value):
+    """Accept only a basis object whose keys are the association-affecting fields."""
+    if not isinstance(value, dict):
+        return None
+    fields = ("lane", "reference", "tolerance", "roi", "front", "origin", "lanes",
+              "channel", "cutoff", "min_height")
+    if set(value) != set(fields):
+        return None
+    return value
+
+
 def settings(value, fallback):
     chosen = {**fallback, **object_value(value)}
     rect = chosen["roi"]
@@ -82,6 +120,9 @@ def settings(value, fallback):
         "channel": channel, "cutoff": numeric(chosen["cutoff"], "显色阈值", .01, .95),
         "min_height": numeric(chosen["min_height"], "最小带高", 1, 200, True),
         "tolerance": numeric(chosen["tolerance"], "Rf 容差", 0, .5),
+        "association": clean_association(chosen.get("association")),
+        "association_basis": clean_basis(chosen.get("association_basis")),
+        "association_active": chosen.get("association_active") is True,
     }
 
 

@@ -20,6 +20,7 @@ class Report:
     rows: list = field(default_factory=list)
     marks: list = field(default_factory=list)
     plot: dict | None = None
+    association: dict | None = None
 
     def metric(self, label, value, units=""):
         self.metrics.append({"label": label, "value": value, "units": units})
@@ -41,6 +42,36 @@ class Report:
 def lane_bands(view, report, number):
     scan = signals.scan(view, number, report.settings["channel"])
     return signals.bands(view, scan, report.settings)
+
+
+def effective_settings(view, mode, settings):
+    """Drop a stale adopted association before a report is computed.
+
+    The association belongs to a specific lane/tolerance/band-detection setup.
+    If any affecting setting changed, or its pairs no longer appear among the
+    adoptable suggestions for the bands currently detected, it is recomputed
+    by the matches report instead of being reused.
+    """
+    adopted = settings.get("association") or {}
+    basis = settings.get("association_basis")
+    if not settings.get("association_active"):
+        return {**settings, "association": {}, "association_active": False}
+    current_basis = reference.adoption_key(settings)
+    if basis != current_basis:
+        return {**settings, "association": {}, "association_basis": None,
+                "association_active": False}
+    if mode in {"matches", "amount"}:
+        sample_scan = signals.scan(view, settings["lane"], settings["channel"])
+        reference_scan = signals.scan(view, settings["reference"], settings["channel"])
+        samples = signals.bands(view, sample_scan, settings)
+        standard = signals.bands(view, reference_scan, settings)
+        _, suggestions = reference.lookup(samples, standard, settings["tolerance"])
+        allowed_pairs = {frozenset((pair["sample"], pair["reference"]))
+                         for suggestion in suggestions for pair in suggestion.pairs}
+        if any(frozenset(item) not in allowed_pairs for item in adopted.items()):
+            return {**settings, "association": {}, "association_basis": None,
+                    "association_active": False}
+    return settings
 
 
 def coordinates(view, out):
@@ -108,30 +139,70 @@ def matches_report(view, out):
     if repeated:
         out.row("请选择另一条参照道", "同道不可比")
         return
-    pairs = reference.lookup(samples, standard, out.settings["tolerance"])
+    pairs, suggestions = reference.lookup(samples, standard, out.settings["tolerance"])
+    adopted = out.settings.get("association") or {}
+    active = bool(out.settings.get("association_active"))
     out.metric("容差内", sum(pair.reference is not None for pair in pairs), "条")
+    basis = reference.adoption_key(out.settings)
+    out.association = {
+        "suggestions": [vars(suggestion) for suggestion in suggestions],
+        "adopted": adopted if active else {},
+        "basis": basis,
+    }
+    if len(suggestions) > 1:
+        cautious, balanced = suggestions if suggestions[0].strategy == "cautious" else (suggestions[1], suggestions[0])
+        out.row("取舍建议 · 先稳单条", f"最偏 |ΔRf| {cautious.max_distance:.4f}",
+                f"整组合计 {cautious.total_distance:.4f} · {cautious.rationale}")
+        out.row("取舍建议 · 先压总量", f"合计 |ΔRf| {balanced.total_distance:.4f}",
+                f"最偏一条 {balanced.max_distance:.4f} · {balanced.rationale}")
+        out.row("建议默认", "先稳单条", "两组认定条数相同；怕某一条勉强配错时选它，要整组最紧时换用另一组。")
     for band in standard:
         out.band(band, STANDARDS, "参")
+    shown = adopted if active else {pair.sample: pair.reference for pair in pairs
+                                    if pair.reference is not None}
     for band, pair in zip(samples, pairs):
         out.band(band, CURRENT, "样")
-        result = f"参照带 {pair.reference}" if pair.reference is not None else "未找到"
+        reference_number = shown.get(band.number)
+        result = f"参照带 {reference_number}" if reference_number is not None else "未找到"
         delta = f"最近 |ΔRf| {pair.distance:.4f}" if pair.distance is not None else "参照道无可读带"
         out.row(f"样品带 {band.number}", result, f"Rf {band.rf:.4f} · {delta}", band.center)
 
 
 def amount_report(view, out):
     samples, standard = pair_lanes(view, out)
-    sample, ref, value = reference.relative_amount(samples, standard,
-                                                  out.settings["sample_band"], out.settings["reference_band"])
-    out.metric("相对显色量", round(value, 2) if value is not None else "无读数", "%" if value is not None else "")
+    adopted = out.settings.get("association") or {}
+    adoption_active = bool(out.settings.get("association_active"))
+    chosen_sample = out.settings["sample_band"]
+    if adoption_active:
+        # No manual fallback: an unmatched sample band stays without a reference.
+        chosen_reference = adopted.get(chosen_sample)
+    else:
+        chosen_reference = out.settings["reference_band"]
+    sample, ref, value = reference.relative_amount(samples, standard, chosen_sample, chosen_reference)
+    auto_reference = adoption_active and chosen_sample in adopted
+    if adoption_active and chosen_sample not in adopted and sample is not None:
+        display_value, units = "无参照", ""
+    else:
+        display_value = round(value, 2) if value is not None else "无读数"
+        units = "%" if value is not None else ""
+    out.metric("相对显色量", display_value, units)
     out.metric("当前道可用带", len(samples), "条")
     out.metric("参照道可用带", len(standard), "条")
+    if adoption_active:
+        out.association = {"adopted": adopted, "active": chosen_sample,
+                          "basis": reference.adoption_key(out.settings)}
     for label, band, ink in (("样品带", sample, CURRENT), ("参照带", ref, STANDARDS)):
         if band is not None:
             out.band(band, ink, label)
             out.row(f"{label} {band.number}", round(band.amount, 2), f"显色积分 · Rf {band.rf:.4f}", band.center)
+        elif label == "参照带" and adoption_active:
+            out.row("参照带", "无参照", "该样品带在参照查找中未认到，保留样品带读数。")
         else:
             out.row(label, "没有该序号", "可先查看显色带或参照查找。")
+    if auto_reference and ref is not None:
+        out.row("认定来源", f"参照带 {ref.number}", "来自本次采用的参照查找认定；换道或改设置后会重新认定。")
+    elif adoption_active and chosen_sample not in adopted:
+        out.row("认定来源", "无参照", "该样品带不在本次采用的认定中；换道或改设置后会重新认定。")
 
 
 def background_report(view, out):
@@ -179,7 +250,11 @@ REPORTERS = dict(spots=spot_report, lanes=lanes_report, profile=profile_report,
 
 
 def report(view, mode, settings):
+    settings = effective_settings(view, mode, settings)
     out = Report(mode, settings)
     coordinates(view, out)
     REPORTERS[mode](view, out)
-    return out.document()
+    document = out.document()
+    if mode in {"matches", "amount"}:
+        document["association_basis"] = reference.adoption_key(settings)
+    return document
