@@ -29,6 +29,7 @@ DEFAULTS = {
     "cutoff": .095,
     "min_height": 5,
     "tolerance": .10,
+    "splits": [],
 }
 CHANNELS = {"auto": "最强显色", "red": "红光", "green": "绿光", "blue": "蓝光"}
 
@@ -57,6 +58,30 @@ def numeric(value, label, start, stop, integer=False):
     return int(number) if integer else number
 
 
+def splits(value):
+    if not isinstance(value, list):
+        raise Invalid("显色带拆分应为列表。")
+    if len(value) > 120:
+        raise Invalid("保存的显色带拆分过多。")
+    result = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise Invalid("显色带拆分格式不正确。")
+        lane = numeric(item.get("lane"), "拆分泳道", 1, 12, True)
+        seeds = item.get("seeds")
+        if not isinstance(seeds, list) or len(seeds) != 2:
+            raise Invalid("显色带拆分缺两条种子位置。")
+        pairs = []
+        for seed in seeds:
+            if not isinstance(seed, list) or len(seed) != 2:
+                raise Invalid("显色带拆分种子格式不正确。")
+            pairs.append([numeric(item_, "拆分种子", 0, 1_000_000, True) for item_ in seed])
+        if pairs[0] == pairs[1]:
+            raise Invalid("显色带拆分的两条种子不能重合。")
+        result.append({"lane": lane, "seeds": sorted(pairs)})
+    return result
+
+
 def settings(value, fallback):
     chosen = {**fallback, **object_value(value)}
     rect = chosen["roi"]
@@ -82,6 +107,7 @@ def settings(value, fallback):
         "channel": channel, "cutoff": numeric(chosen["cutoff"], "显色阈值", .01, .95),
         "min_height": numeric(chosen["min_height"], "最小带高", 1, 200, True),
         "tolerance": numeric(chosen["tolerance"], "Rf 容差", 0, .5),
+        "splits": splits(chosen.get("splits", [])),
     }
 
 

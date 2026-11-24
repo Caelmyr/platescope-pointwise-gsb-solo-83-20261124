@@ -10,6 +10,7 @@ from . import reference, signals
 CURRENT = "#198777"
 STANDARDS = "#9e532d"
 GUIDE = "#398387"
+PARTS = ("#166958", "#ac5619")
 
 
 @dataclass
@@ -20,6 +21,7 @@ class Report:
     rows: list = field(default_factory=list)
     marks: list = field(default_factory=list)
     plot: dict | None = None
+    suggestions: list = field(default_factory=list)
 
     def metric(self, label, value, units=""):
         self.metrics.append({"label": label, "value": value, "units": units})
@@ -32,7 +34,9 @@ class Report:
         self.marks.append({"type": kind, "points": [[x0, y0], [x1, y1]], "color": color, "label": label})
 
     def band(self, band, color=CURRENT, prefix=""):
-        self.mark("box", band.box, color, f"{prefix}{band.number}")
+        label = f"{prefix}{band.parent}" + (f"·{band.part}" if band.part else "")
+        tint = PARTS[(band.part or 1) - 1] if band.part else color
+        self.mark("box", band.box, tint, label)
 
     def document(self):
         return {**vars(self), "heading": MODES[self.mode]}
@@ -41,6 +45,47 @@ class Report:
 def lane_bands(view, report, number):
     scan = signals.scan(view, number, report.settings["channel"])
     return signals.bands(view, scan, report.settings)
+
+
+def band_label(band):
+    return f"带 {band.parent} 第 {band.part}/2 团" if band.part else f"带 {band.number}"
+
+
+def split_note(band):
+    if band.part:
+        return (f"拆分第 {band.part}/2 团 · 计入支持区 {band.pixels} px · "
+                f"显色积分 {band.amount:.1f}")
+    return f"Rf · 支持区 {band.pixels} px · 显色积分 {band.amount:.1f}"
+
+
+def split_suggestions(bands):
+    found = []
+    for band in bands:
+        if band.suggestion and band.suggestion.get("verdict") == "split":
+            found.append({"band": band.number, **band.suggestion})
+    return found
+
+
+def lost_split(out, bands):
+    """A saved split was requested for this lane but no part was produced."""
+    lane = out.settings["lane"]
+    requested = [entry for entry in out.settings.get("splits", []) if entry.get("lane") == lane]
+    applied = any(band.part for band in bands)
+    if requested and not applied:
+        out.row("已保存的拆分", "本次未套用",
+                "标定或阈值改动后，两条种子不再落在同一条显色带内，整带保留。")
+
+
+def retained_notes(bands):
+    notes = []
+    for band in bands:
+        note = band.suggestion
+        if not note or note.get("verdict") == "split":
+            continue
+        if note.get("verdict") == "single":
+            continue
+        notes.append((band, note["reason"]))
+    return notes
 
 
 def coordinates(view, out):
@@ -55,12 +100,16 @@ def coordinates(view, out):
 def spot_report(view, out):
     bands = lane_bands(view, out, out.settings["lane"])
     out.metric("显色带", len(bands), "条")
+    out.metric("原带", len({band.parent for band in bands}), "条")
     out.metric("迁移距离", view.origin - view.front, "px")
     out.metric("显色积分", round(sum(band.amount for band in bands), 1))
     for band in bands:
         out.band(band, prefix="带")
-        out.row(f"带 {band.number}", round(band.rf, 4),
-                f"Rf · 支持区 {band.pixels} px · 显色积分 {band.amount:.1f}", band.center)
+        out.row(band_label(band), round(band.rf, 4), split_note(band), band.center)
+    out.suggestions.extend(split_suggestions(bands))
+    for band, reason in retained_notes(bands):
+        out.row(band_label(band), "保留整带", reason, band.center)
+    lost_split(out, bands)
 
 
 def lanes_report(view, out):
@@ -82,16 +131,28 @@ def profile_report(view, out):
     lane = signals.scan(view, out.settings["lane"], out.settings["channel"])
     bands = signals.bands(view, lane, out.settings)
     x0, y0, x1, _ = lane.box
-    indexes = np.unique(np.linspace(len(lane.profile) - 1, 0, min(len(lane.profile), 550)).round().astype(int))
-    x = (x0 + x1 - 1) // 2
-    out.plot = {"label": "Rf 与道内平均显色", "samples": [
-        {"x": round(view.rf(y0 + int(i)), 6), "y": round(float(lane.profile[i]), 6), "at": [x, y0 + int(i)]}
-        for i in reversed(indexes)]}
+    if any(band.part for band in bands):
+        series = signals.series(view, lane, bands)
+        out.plot = {"label": "Rf 与逐团显色（每团计入像素的显色和）",
+                    "samples": series[0]["samples"] if series else [], "series": series}
+    else:
+        indexes = np.unique(np.linspace(len(lane.profile) - 1, 0, min(len(lane.profile), 550)).round().astype(int))
+        x = (x0 + x1 - 1) // 2
+        out.plot = {"label": "Rf 与道内平均显色", "samples": [
+            {"x": round(view.rf(y0 + int(i)), 6), "y": round(float(lane.profile[i]), 6), "at": [x, y0 + int(i)]}
+            for i in reversed(indexes)]}
     out.metric("平均显色峰值", round(float(lane.profile.max()), 4))
     out.metric("显色带", len(bands), "条")
+    out.metric("原带", len({band.parent for band in bands}), "条")
     for band in bands:
         out.band(band, prefix="带")
-        out.row(f"带 {band.number}", round(band.peak, 4), f"峰值 · Rf {band.rf:.4f}", band.center)
+        detail = (f"拆分第 {band.part}/2 团 · 计入 {band.pixels} px · 峰值 {band.peak:.4f}"
+                  if band.part else f"峰值 · Rf {band.rf:.4f}")
+        out.row(band_label(band), round(band.rf, 4), detail, band.center)
+    out.suggestions.extend(split_suggestions(bands))
+    for band, reason in retained_notes(bands):
+        out.row(band_label(band), "保留整带", reason, band.center)
+    lost_split(out, bands)
 
 
 def pair_lanes(view, out):
@@ -116,7 +177,7 @@ def matches_report(view, out):
         out.band(band, CURRENT, "样")
         result = f"参照带 {pair.reference}" if pair.reference is not None else "未找到"
         delta = f"最近 |ΔRf| {pair.distance:.4f}" if pair.distance is not None else "参照道无可读带"
-        out.row(f"样品带 {band.number}", result, f"Rf {band.rf:.4f} · {delta}", band.center)
+        out.row(band_label(band), result, f"Rf {band.rf:.4f} · {delta}", band.center)
 
 
 def amount_report(view, out):
@@ -129,7 +190,8 @@ def amount_report(view, out):
     for label, band, ink in (("样品带", sample, CURRENT), ("参照带", ref, STANDARDS)):
         if band is not None:
             out.band(band, ink, label)
-            out.row(f"{label} {band.number}", round(band.amount, 2), f"显色积分 · Rf {band.rf:.4f}", band.center)
+            out.row(band_label(band), round(band.amount, 2),
+                    f"显色积分 · Rf {band.rf:.4f}", band.center)
         else:
             out.row(label, "没有该序号", "可先查看显色带或参照查找。")
 
@@ -157,20 +219,21 @@ def tails_report(view, out):
     out.metric("可读拖尾", sum(band.tail is not None for band in bands), "条")
     for band in bands:
         out.band(band, prefix="带")
-        out.row(f"带 {band.number}", round(band.tail, 3) if band.tail is not None else "超出带界",
+        out.row(band_label(band), round(band.tail, 3) if band.tail is not None else "超出带界",
                 f"向起跑线一侧 / 向前沿一侧半高宽 · Rf {band.rf:.4f}", band.center)
 
 
 def colors_report(view, out):
     bands = lane_bands(view, out, out.settings["lane"])
     out.metric("显色带", len(bands), "条")
+    out.metric("原带", len({band.parent for band in bands}), "条")
     for band in bands:
         out.band(band, prefix="带")
         components = band.components
         labels = ("R", "G", "B") if len(components) == 3 else ("灰度",)
         total = sum(components)
         text = " · ".join(f"{label} {part / total * 100:.1f}%" for label, part in zip(labels, components))
-        out.row(f"带 {band.number}", round(band.rf, 4), text, band.center)
+        out.row(band_label(band), round(band.rf, 4), text, band.center)
 
 
 REPORTERS = dict(spots=spot_report, lanes=lanes_report, profile=profile_report,

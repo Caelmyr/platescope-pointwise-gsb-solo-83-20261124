@@ -4,6 +4,7 @@ const byId = (name) => document.getElementById(name);
 const state = {
   modes: {}, mode: 'spots', panel: null, options: null, image: null, result: null,
   tool: null, anchor: null, hover: null, marker: null, plotCursor: null, serial: 0,
+  seriesKey: null, suggestion: null,
 };
 const photoCanvas = byId('photo');
 const photoContext = photoCanvas.getContext('2d');
@@ -90,6 +91,7 @@ function listChecks() {
 function inputValues() {
   const form = byId('settings');
   return {...state.options, channel: form.elements.channel.value,
+          splits: state.options?.splits ?? [],
           ...Object.fromEntries(inputNames.map(name => [name, form.elements[name].valueAsNumber]))};
 }
 
@@ -214,16 +216,48 @@ function showAt(at) {
   drawPhoto();
 }
 
+function activeSeries() {
+  const graph = state.result?.plot;
+  const list = graph?.series ?? [];
+  if (!list.length) return null;
+  return list.find(part => part.key === state.seriesKey) || list[0];
+}
+
+function drawLegend() {
+  const legend = byId('plot-legend');
+  const series = state.result?.plot?.series ?? [];
+  legend.replaceChildren();
+  legend.hidden = !series.length;
+  if (!series.length) return;
+  const chosen = activeSeries();
+  for (const part of series) {
+    const dot = piece('i');
+    dot.style.background = part.color;
+    const button = piece('button', part.key === chosen?.key ? 'chosen' : '');
+    button.append(dot, document.createTextNode(part.label));
+    button.setAttribute('aria-pressed', String(part.key === chosen?.key));
+    button.addEventListener('click', () => {
+      state.seriesKey = part.key;
+      state.plotCursor = null;
+      drawPlot();
+    });
+    legend.append(button);
+  }
+}
+
 function drawPlot() {
   const graph = state.result?.plot;
-  byId('plot-box').hidden = !graph?.samples.length;
-  if (!graph?.samples.length) return;
+  const series = activeSeries();
+  const samples = series ? series.samples : graph?.samples ?? [];
+  byId('plot-box').hidden = !samples.length;
+  drawLegend();
+  if (!samples.length) return;
   const {width, height} = plotCanvas;
   plotContext.clearRect(0, 0, width, height);
   byId('plot-title').textContent = graph.label;
-  byId('sample-read').textContent = state.plotCursor
-    ? `${state.plotCursor.x} · ${state.plotCursor.y}` : '点击曲线回到原片';
-  const samples = graph.samples;
+  const chosen = state.plotCursor;
+  byId('sample-read').textContent = chosen
+    ? `${chosen.x} · ${chosen.y}` : series ? '点击曲线回到这一团计入的像素' : '点击曲线回到原片';
   const [left, right, top, bottom] = [47, width - 27, 13, height - 28];
   const minX = samples[0].x;
   const maxX = samples.at(-1).x;
@@ -245,7 +279,7 @@ function drawPlot() {
     plotContext.fillText(String(+value.toPrecision(4)), toX(value), bottom + 21);
   }
   plotContext.beginPath();
-  plotContext.strokeStyle = '#166958';
+  plotContext.strokeStyle = series ? series.color : '#166958';
   plotContext.lineWidth = 2;
   samples.forEach((sample, index) => {
     if (index) plotContext.lineTo(toX(sample.x), toY(sample.y));
@@ -253,12 +287,41 @@ function drawPlot() {
   });
   plotContext.stroke();
   plotContext.lineWidth = 1;
-  if (state.plotCursor) {
-    plotContext.fillStyle = '#ac5619';
+  if (chosen) {
+    plotContext.fillStyle = series ? series.color : '#ac5619';
     plotContext.beginPath();
-    plotContext.arc(toX(state.plotCursor.x), toY(state.plotCursor.y), 5, 0, Math.PI * 2);
+    plotContext.arc(toX(chosen.x), toY(chosen.y), 5, 0, Math.PI * 2);
     plotContext.fill();
   }
+}
+
+function renderSplit() {
+  const list = state.result?.suggestions ?? [];
+  const box = byId('split-box');
+  const target = byId('split-list');
+  target.replaceChildren();
+  box.hidden = !list.length;
+  state.suggestion = null;
+  for (const suggestion of list) {
+    const card = piece('div', 'split-card');
+    card.append(piece('strong', '', `带 ${suggestion.band} 可拆成两团`),
+                piece('p', '', suggestion.reason));
+    const button = piece('button', 'primary', '采用拆分');
+    button.addEventListener('click', () => adopt(suggestion));
+    card.append(button);
+    target.append(card);
+  }
+  if (list.length) state.suggestion = list[0];
+}
+
+async function adopt(suggestion) {
+  const rest = (state.options.splits ?? []).filter(item => item.lane !== suggestion.lane);
+  state.options = {...inputValues(), splits: [...rest, {lane: suggestion.lane, seeds: suggestion.seeds}]};
+  state.marker = null;
+  state.plotCursor = null;
+  state.seriesKey = null;
+  await run();
+  notice('已采用拆分；可在「显色曲线」逐团查看，保存读板会一并保留');
 }
 
 function renderResult() {
@@ -289,6 +352,8 @@ function renderResult() {
     if (result.id) download.href = '/tlc' + panelPath(`/checks/${result.id}/${ext}`);
     else download.removeAttribute('href');
   }
+  renderSplit();
+  state.seriesKey = (result.plot?.series ?? []).length ? state.seriesKey : null;
   drawPhoto();
   drawPlot();
   listChecks();
@@ -390,12 +455,14 @@ photoCanvas.addEventListener('click', safe(async (event) => {
 
 plotCanvas.addEventListener('click', (event) => {
   const graph = state.result?.plot;
-  if (!graph?.samples.length) return;
+  const series = activeSeries();
+  const samples = series ? series.samples : graph?.samples ?? [];
+  if (!samples.length) return;
   const rect = plotCanvas.getBoundingClientRect();
   const left = 47, right = plotCanvas.width - 27;
   const x = (event.clientX - rect.left) * plotCanvas.width / rect.width;
   const t = Math.max(0, Math.min(1, (x - left) / (right - left)));
-  state.plotCursor = graph.samples[Math.round(t * (graph.samples.length - 1))];
+  state.plotCursor = samples[Math.round(t * (samples.length - 1))];
   showAt(state.plotCursor.at);
   drawPlot();
 });

@@ -17,9 +17,18 @@ def csv_text(result):
     for row in result["rows"]:
         at = row.get("at") or ["", ""]
         writer.writerow([row["label"], row["value"], row["detail"], *at])
+    for item in result.get("suggestions", []):
+        writer.writerow([f"split suggestion band {item['band']}", item["verdict"], item["reason"],
+                         *item["seeds"][0]])
     if result.get("plot"):
-        writer.writerow(["plot_x", "plot_y", result["plot"]["label"]])
-        writer.writerows((point["x"], point["y"]) for point in result["plot"]["samples"])
+        series = result["plot"].get("series", [])
+        if not series:
+            writer.writerow(["plot_x", "plot_y", result["plot"]["label"]])
+            writer.writerows((point["x"], point["y"]) for point in result["plot"]["samples"])
+        for part in series:
+            writer.writerow(["plot_series", part["key"], part["label"], part["color"]])
+            writer.writerow(["series_x", "series_y", "original_x", "original_y"])
+            writer.writerows((point["x"], point["y"], *point["at"]) for point in part["samples"])
     return stream.getvalue()
 
 

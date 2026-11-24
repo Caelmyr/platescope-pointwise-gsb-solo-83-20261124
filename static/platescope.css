@@ -88,6 +88,13 @@ fieldset legend { font-size: .86rem; font-weight: 700; }
 .reading small { grid-column: 1 / -1; }
 #plot-box { margin: 10px 0; background: white; border: 1px solid var(--line); border-radius: 5px; padding: 8px; }
 #plot { display: block; width: 100%; cursor: crosshair; }
+.plot-legend { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0; }
+.plot-legend button { padding: 2px 7px; font-size: .76rem; border-radius: 999px; }
+.plot-legend button.chosen { font-weight: 700; }
+.plot-legend i { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 4px; }
+#split-box { margin: 10px 0; background: #fffdf5; border: 1px solid #e0d6b4; border-radius: 5px; padding: 8px; }
+.split-card + .split-card { border-top: 1px solid #e7ddbd; margin-top: 7px; padding-top: 7px; }
+.split-card p { color: var(--muted); font-size: .8rem; margin: 4px 0 7px; }
 .downloads { display: flex; gap: 7px; flex-wrap: wrap; }
 .downloads:not(:empty) a { margin-top: 10px; font-size: .81rem; }
 @media (max-width: 940px) {
